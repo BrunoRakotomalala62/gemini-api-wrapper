@@ -10,7 +10,6 @@ app = FastAPI(title="Gemini API Wrapper")
 
 COOKIES_FILE = "gemini.google.com_cookies-2026-01-29T090222.522.txt"
 
-# Système de cache pour accélérer les réponses (évite de re-récupérer le token à chaque fois)
 class GeminiSession:
     def __init__(self):
         self.session = None
@@ -18,7 +17,7 @@ class GeminiSession:
         self.last_update = 0
 
     def refresh(self):
-        if self.session and self.token and (time.time() - self.last_update < 3600):
+        if self.session and self.token and (time.time() - self.last_update < 1800):
             return self.session, self.token
         
         cookies = {}
@@ -29,10 +28,15 @@ class GeminiSession:
                     if len(parts) >= 7: cookies[parts[5]] = parts[6]
         
         self.session = requests.Session()
-        for n, v in cookies.items(): self.session.cookies.set(n, v, domain=".google.com")
+        for n, v in cookies.items(): 
+            self.session.cookies.set(n, v, domain=".google.com")
         
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
-        resp = self.session.get("https://gemini.google.com/app", headers=headers, timeout=10)
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+            "Referer": "https://gemini.google.com/app"
+        }
+        
+        resp = self.session.get("https://gemini.google.com/app", headers=headers, timeout=15)
         match = re.search(r'"SNlM0e":"(.*?)"', resp.text)
         if not match: raise Exception("Auth failed")
         
@@ -42,16 +46,15 @@ class GeminiSession:
 
 gemini_auth = GeminiSession()
 
-def extract_text(raw):
+def extract_text(raw_line):
     try:
-        for line in raw.splitlines():
-            if "wrb.fr" in line:
-                data = json.loads(line)
-                inner = json.loads(data[0][2])
-                if len(inner) > 4 and inner[4]:
-                    for item in inner[4]:
-                        if isinstance(item, list) and len(item) > 1 and isinstance(item[1], list):
-                            return item[1][0]
+        if "wrb.fr" in raw_line:
+            data = json.loads(raw_line)
+            inner = json.loads(data[0][2])
+            if len(inner) > 4 and inner[4]:
+                for item in inner[4]:
+                    if isinstance(item, list) and len(item) > 1 and isinstance(item[1], list):
+                        return item[1][0]
         return None
     except: return None
 
@@ -60,18 +63,28 @@ async def gemini_endpoint(prompt: str, image: Optional[str] = None, uid: Optiona
     start_time = time.time()
     try:
         session, token = gemini_auth.refresh()
-        
-        # Pour les images, Gemini via cette API nécessite normalement un upload préalable.
-        # On inclut l'URL dans le prompt pour assurer une réponse rapide et fonctionnelle.
         full_prompt = f"{prompt}\nImage URL: {image}" if image else prompt
-        
         req = [[full_prompt], None, ["", "", ""]]
         payload = {"f.req": json.dumps([None, json.dumps(req)]), "at": token}
         
         url = "https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate"
-        resp = session.post(url, data=payload, params={"rt": "c"}, timeout=20)
         
-        answer = extract_text(resp.text)
+        # Utilisation de stream=True pour éviter d'attendre la fin de la connexion
+        # et timeout augmenté pour la connexion initiale
+        resp = session.post(url, data=payload, params={"rt": "c"}, timeout=(10, 60), stream=True)
+        
+        answer = None
+        # On lit les lignes au fur et à mesure
+        for line in resp.iter_lines():
+            if line:
+                decoded_line = line.decode('utf-8')
+                res = extract_text(decoded_line)
+                if res:
+                    answer = res
+                    break # On a trouvé la réponse, on peut s'arrêter
+        
+        # Fermer la connexion proprement
+        resp.close()
         
         return {
             "status": "success",
