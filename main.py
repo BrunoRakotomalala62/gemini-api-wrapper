@@ -3,6 +3,7 @@ import requests
 import json
 import re
 import time
+import mimetypes
 from fastapi import FastAPI, HTTPException, Query
 from typing import Optional
 
@@ -21,14 +22,22 @@ class GeminiSession:
             return self.session, self.token
         
         cookies = {}
+        # Assurez-vous que le fichier de cookies existe et est lisible
+        if not os.path.exists(COOKIES_FILE):
+            raise Exception(f"Fichier de cookies non trouvé: {COOKIES_FILE}")
+
         with open(COOKIES_FILE, 'r') as f:
             for line in f:
                 if not line.startswith('#') and line.strip():
                     parts = line.strip().split('\t')
-                    if len(parts) >= 7: cookies[parts[5]] = parts[6]
+                    # Vérification de la longueur des parties pour éviter IndexError
+                    if len(parts) >= 7: 
+                        # Le 6ème élément (index 5) est le nom du cookie, le 7ème (index 6) est la valeur
+                        cookies[parts[5]] = parts[6]
         
         self.session = requests.Session()
         for n, v in cookies.items(): 
+            # Assurez-vous que le domaine est correct pour l'injection de cookies
             self.session.cookies.set(n, v, domain=".google.com")
         
         headers = {
@@ -36,13 +45,52 @@ class GeminiSession:
             "Referer": "https://gemini.google.com/app"
         }
         
+        # Tentative de récupération du token SNlM0e
         resp = self.session.get("https://gemini.google.com/app", headers=headers, timeout=15)
         match = re.search(r'"SNlM0e":"(.*?)"', resp.text)
-        if not match: raise Exception("Auth failed")
+        if not match: raise Exception("Auth failed: SNlM0e token not found. Check cookies.")
         
         self.token = match.group(1)
         self.last_update = time.time()
         return self.session, self.token
+
+    def upload_image(self, image_path: str, token: str):
+        if not os.path.exists(image_path):
+            raise FileNotFoundError(f"Image non trouvée: {image_path}")
+
+        mime_type, _ = mimetypes.guess_type(image_path)
+        if not mime_type or not mime_type.startswith('image/'):
+            raise ValueError(f"Type de fichier non supporté ou non détecté: {mime_type}")
+
+        upload_url = "https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/Upload"
+        
+        # Le payload d'upload est un formulaire multipart
+        files = {
+            'upload_file': (os.path.basename(image_path), open(image_path, 'rb'), mime_type)
+        }
+        
+        # Le token est passé dans les données du formulaire
+        data = {
+            'at': token
+        }
+
+        # L'upload utilise un endpoint différent et un format de réponse différent
+        upload_resp = self.session.post(upload_url, files=files, data=data, timeout=60)
+        
+        # La réponse est souvent préfixée par des caractères de sécurité
+        if upload_resp.text.startswith(")]}'\n"):
+            response_text = upload_resp.text[5:]
+            try:
+                # La réponse est un tableau JSON imbriqué
+                response_json = json.loads(response_text)
+                # Le File ID est généralement dans la structure [0][0]
+                file_id = response_json[0][0]
+                return file_id
+            except (json.JSONDecodeError, IndexError, TypeError) as e:
+                raise Exception(f"Erreur de décodage de la réponse d'upload: {e}. Réponse brute: {upload_resp.text}")
+        else:
+            raise Exception(f"Réponse d'upload inattendue: {upload_resp.text}")
+
 
 gemini_auth = GeminiSession()
 
@@ -59,31 +107,47 @@ def extract_text(raw_line):
     except: return None
 
 @app.get("/gemini")
-async def gemini_endpoint(prompt: str, image: Optional[str] = None, uid: Optional[str] = None):
+async def gemini_endpoint(prompt: str, image_path: Optional[str] = None, uid: Optional[str] = None):
     start_time = time.time()
+    file_id = None
+    
     try:
         session, token = gemini_auth.refresh()
-        full_prompt = f"{prompt}\nImage URL: {image}" if image else prompt
-        req = [[full_prompt], None, ["", "", ""]]
+        
+        # 1. Gestion de l'image (Upload)
+        if image_path:
+            print(f"Tentative d'upload de l'image: {image_path}")
+            file_id = gemini_auth.upload_image(image_path, token)
+            print(f"Image uploadée avec succès. File ID: {file_id}")
+
+        # 2. Construction du payload
+        # Le prompt est toujours le premier élément
+        req = [[prompt], None, ["", "", ""]]
+        
+        # Si un File ID est disponible, on modifie la structure de la requête
+        if file_id:
+            # La structure pour l'image est généralement [File ID, 1, 1]
+            image_data = [file_id, 1, 1]
+            # L'image est insérée dans la structure de la requête
+            # La position exacte peut varier, mais c'est souvent le 4ème élément du 3ème tableau
+            # Dans ce cas, on utilise la structure simplifiée [prompt, [image_data]]
+            req = [[prompt, [image_data]], None, ["", "", ""]]
+            
         payload = {"f.req": json.dumps([None, json.dumps(req)]), "at": token}
         
         url = "https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate"
         
-        # Utilisation de stream=True pour éviter d'attendre la fin de la connexion
-        # et timeout augmenté pour la connexion initiale
         resp = session.post(url, data=payload, params={"rt": "c"}, timeout=(10, 60), stream=True)
         
         answer = None
-        # On lit les lignes au fur et à mesure
         for line in resp.iter_lines():
             if line:
                 decoded_line = line.decode('utf-8')
                 res = extract_text(decoded_line)
                 if res:
                     answer = res
-                    break # On a trouvé la réponse, on peut s'arrêter
+                    break
         
-        # Fermer la connexion proprement
         resp.close()
         
         return {
@@ -93,6 +157,8 @@ async def gemini_endpoint(prompt: str, image: Optional[str] = None, uid: Optiona
             "execution_time": f"{round(time.time() - start_time, 2)}s"
         }
     except Exception as e:
+        # Afficher l'erreur dans la console pour le débogage
+        print(f"Erreur critique: {e}")
         return {"status": "error", "message": str(e)}
 
 if __name__ == "__main__":
