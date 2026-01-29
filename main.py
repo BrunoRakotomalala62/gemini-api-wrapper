@@ -45,8 +45,8 @@ class GeminiSession:
             "Referer": "https://gemini.google.com/app"
         }
         
-        # Tentative de récupération du token SNlM0e
-        resp = self.session.get("https://gemini.google.com/app", headers=headers, timeout=15)
+        # Tentative de récupération du token SNlM0e avec un timeout plus généreux pour Render
+        resp = self.session.get("https://gemini.google.com/app", headers=headers, timeout=30)
         match = re.search(r'"SNlM0e":"(.*?)"', resp.text)
         if not match: raise Exception("Auth failed: SNlM0e token not found. Check cookies.")
         
@@ -153,8 +153,9 @@ async def gemini_endpoint(prompt: str, image: Optional[str] = None, uid: Optiona
         
         url = "https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate"
         
-        # Optimisation : Réduction du timeout et traitement plus rapide du stream
-        resp = session.post(url, data=payload, params={"rt": "c"}, timeout=(5, 30), stream=True)
+        # Ajustement pour Render : On augmente le timeout de lecture à 60s pour éviter le ReadTimeout
+        # tout en gardant un timeout de connexion court (10s).
+        resp = session.post(url, data=payload, params={"rt": "c"}, timeout=(10, 60), stream=True)
         
         answer = None
         # On cherche la réponse finale plus efficacement
