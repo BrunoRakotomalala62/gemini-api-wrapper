@@ -21,6 +21,39 @@ def get_cookies_from_file(file_path):
                     cookies[parts[5]] = parts[6]
     return cookies
 
+def extract_gemini_text(raw_response: str):
+    """Extrait proprement le texte de la réponse de Gemini depuis le flux JSON."""
+    try:
+        for line in raw_response.splitlines():
+            if "wrb.fr" in line:
+                data = json.loads(line)
+                # Les données de réponse sont dans le 3ème élément (index 2) et sont encodées en JSON
+                inner_json_str = data[0][2]
+                if not inner_json_str: continue
+                
+                inner_data = json.loads(inner_json_str)
+                
+                # Structure typique de réponse : [null, [ids], null, null, [[rc_id, [text_parts]]]]
+                # On cherche la partie qui contient le texte de la réponse
+                if len(inner_data) > 5 and inner_data[5]:
+                    # Parfois le texte est ici
+                    for candidate in inner_data[5]:
+                        if isinstance(candidate, list) and len(candidate) > 1:
+                            if isinstance(candidate[1], list) and candidate[1]:
+                                return candidate[1][0]
+                
+                # Autre structure possible (plus fréquente)
+                if len(inner_data) > 4 and inner_data[4]:
+                    for item in inner_data[4]:
+                        if isinstance(item, list) and len(item) > 1:
+                            # Le texte est souvent dans le deuxième élément du sous-élément
+                            if isinstance(item[1], list) and item[1]:
+                                return item[1][0]
+        return None
+    except Exception as e:
+        print(f"Erreur d'extraction: {e}")
+        return None
+
 def get_gemini_response_real(prompt: str):
     cookies = get_cookies_from_file(COOKIES_FILE)
     if not cookies:
@@ -30,57 +63,44 @@ def get_gemini_response_real(prompt: str):
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "*/*",
+        "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
         "Origin": "https://gemini.google.com",
         "Referer": "https://gemini.google.com/",
     }
 
     session = requests.Session()
-    # Ajout des cookies à la session
     for name, value in cookies.items():
         session.cookies.set(name, value, domain=".google.com")
 
     try:
-        # 1. Récupérer le token SNlM0e
+        # 1. Obtenir SNlM0e
         resp = session.get(url, headers=headers, timeout=15)
-        snlm0e = re.search(r'"SNlM0e":"(.*?)"', resp.text)
-        if not snlm0e:
-            return {"error": "Impossible de trouver le token SNlM0e. Les cookies sont peut-être expirés ou invalides."}
-        token = snlm0e.group(1)
+        match = re.search(r'"SNlM0e":"(.*?)"', resp.text)
+        if not match:
+            return {"error": "Cookies invalides ou expirés (SNlM0e non trouvé)."}
+        token = match.group(1)
 
-        # 2. Envoyer la requête de chat
+        # 2. Envoyer la requête
         chat_url = "https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate"
-        
-        # Format de données spécifique à l'API interne de Gemini (basé sur reverse engineering courant)
         req_inner = [[prompt], None, ["", "", ""]]
-        req_outer = [None, json.dumps(req_inner)]
         
-        post_data = {
-            "f.req": json.dumps([None, json.dumps(req_outer)]),
+        payload = {
+            "f.req": json.dumps([None, json.dumps(req_inner)]),
             "at": token
         }
         
-        params = {
-            "bl": "boq_assistant-bard-web-server_20240124.11_p0",
-            "_reqid": "12345",
-            "rt": "c"
-        }
-
-        chat_resp = session.post(chat_url, params=params, data=post_data, headers=headers, timeout=30)
+        params = {"_reqid": "12345", "rt": "c"}
+        chat_resp = session.post(chat_url, params=params, data=payload, headers=headers, timeout=30)
         
-        # Tentative d'extraction du texte de la réponse
-        lines = chat_resp.text.splitlines()
-        for line in lines:
-            if "wrb.fr" in line:
-                try:
-                    data = json.loads(line)
-                    inner_data = json.loads(data[0][2])
-                    # La réponse textuelle se trouve souvent à cet index
-                    response_text = inner_data[4][0][1][0]
-                    return {"status": "success", "prompt": prompt, "answer": response_text}
-                except:
-                    continue
+        if chat_resp.status_code != 200:
+            return {"error": f"Erreur Google: {chat_resp.status_code}"}
 
-        return {"status": "partial", "prompt": prompt, "raw_sample": chat_resp.text[:500]}
+        # 3. Extraire le texte
+        answer = extract_gemini_text(chat_resp.text)
+        if answer:
+            return {"status": "success", "answer": answer}
+        else:
+            return {"status": "partial", "raw": chat_resp.text[:500]}
 
     except Exception as e:
         return {"error": str(e)}
@@ -90,19 +110,14 @@ async def gemini_endpoint(prompt: str, uid: Optional[str] = None):
     result = get_gemini_response_real(prompt)
     
     if "error" in result:
-        return {
-            "status": "error",
-            "uid": uid,
-            "prompt": prompt,
-            "error_detail": result["error"]
-        }
+        return {"status": "error", "uid": uid, "error": result["error"]}
     
     return {
         "status": "success",
         "uid": uid,
         "prompt": prompt,
-        "answer": result.get("answer", "Réponse reçue mais le format d'extraction a échoué."),
-        "raw_data_preview": result.get("raw_sample")
+        "answer": result.get("answer", "Réponse reçue mais format d'extraction inconnu."),
+        "raw_preview": result.get("raw")
     }
 
 if __name__ == "__main__":
