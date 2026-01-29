@@ -9,7 +9,7 @@ from typing import Optional
 
 app = FastAPI(title="Gemini API Wrapper")
 
-COOKIES_FILE = "gemini.google.com_cookies-2026-01-29T090222.522.txt"
+COOKIES_FILE = "gemini.google.com_cookies-2026-01-29T151723.456.txt"
 
 class GeminiSession:
     def __init__(self):
@@ -153,16 +153,22 @@ async def gemini_endpoint(prompt: str, image: Optional[str] = None, uid: Optiona
         
         url = "https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate"
         
-        resp = session.post(url, data=payload, params={"rt": "c"}, timeout=(10, 60), stream=True)
+        # Optimisation : Réduction du timeout et traitement plus rapide du stream
+        resp = session.post(url, data=payload, params={"rt": "c"}, timeout=(5, 30), stream=True)
         
         answer = None
+        # On cherche la réponse finale plus efficacement
         for line in resp.iter_lines():
             if line:
                 decoded_line = line.decode('utf-8')
-                res = extract_text(decoded_line)
-                if res:
-                    answer = res
-                    break
+                # On cherche directement la ligne contenant la réponse textuelle
+                if "wrb.fr" in decoded_line:
+                    res = extract_text(decoded_line)
+                    if res:
+                        answer = res
+                        # On ne s'arrête pas forcément à la première ligne si c'est un stream partiel
+                        # Mais pour la rapidité, on prend la première réponse complète trouvée
+                        break
         
         resp.close()
         
