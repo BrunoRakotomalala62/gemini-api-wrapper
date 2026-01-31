@@ -136,7 +136,10 @@ async def process_gemini_request(prompt: str, image: Optional[str] = None, uid: 
             # Fallback prompt si l'upload n'est pas implémenté
             if image and not file_id:
                 if image == "Image_Base64":
-                    prompt = f"[Analyse cette image]\n\n{prompt}"
+                    # Pour le test, on va simuler l'envoi de l'image en incluant sa description ou en utilisant l'URL si possible
+                    # Dans ce wrapper, l'image est juste un placeholder. 
+                    # Pour que Gemini "voie" l'image via ce wrapper, il faudrait qu'elle soit uploadée sur les serveurs de Google.
+                    prompt = f"[Analyse cette image: {image}]\n\n{prompt}"
                 else:
                     prompt = f"[Image: {image}]\n\n{prompt}"
 
