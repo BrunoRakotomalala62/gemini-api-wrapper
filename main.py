@@ -148,6 +148,7 @@ async def process_gemini_request(prompt: str, image: Optional[str] = None, uid: 
     start_time = time.time()
     file_id = None
     temp_image_path = None
+    b64_image = None
     
     try:
         session, token = gemini_auth.refresh()
@@ -156,6 +157,7 @@ async def process_gemini_request(prompt: str, image: Optional[str] = None, uid: 
         if image:
             if image.startswith("data:image"):
                 try:
+                    b64_image = image
                     header, encoded = image.split(",", 1)
                     ext_match = re.search(r'image/(.*?);', header)
                     ext = ext_match.group(1) if ext_match else "jpg"
@@ -170,6 +172,11 @@ async def process_gemini_request(prompt: str, image: Optional[str] = None, uid: 
                 try:
                     img_resp = requests.get(image, timeout=15)
                     if img_resp.status_code == 200:
+                        # Convertir en base64 pour le fallback
+                        mime_type = img_resp.headers.get('Content-Type', 'image/jpeg')
+                        encoded_string = base64.b64encode(img_resp.content).decode('utf-8')
+                        b64_image = f"data:{mime_type};base64,{encoded_string}"
+                        
                         temp_image_path = f"/tmp/temp_image_{int(time.time())}.jpg"
                         with open(temp_image_path, 'wb') as f:
                             f.write(img_resp.content)
@@ -178,15 +185,17 @@ async def process_gemini_request(prompt: str, image: Optional[str] = None, uid: 
                 except Exception as e:
                     print(f"Erreur téléchargement image: {e}")
 
-            # Tentative d'upload réel vers Google
+            # Tentative d'upload réel vers Google (méthode recommandée)
             if temp_image_path and os.path.exists(temp_image_path):
                 file_id = gemini_auth.upload_image(temp_image_path)
 
-            # Fallback prompt si l'upload a échoué
-            if image and not file_id:
-                # Si l'image est une URL, on demande à Gemini de l'analyser via l'URL
-                # On ajoute une instruction forte pour forcer l'analyse visuelle
-                prompt = f"Voici une image à analyser : {image}\n\nDécris précisément ce que tu vois sur cette photo et réponds à la question suivante : {prompt}"
+            # Fallback prompt si l'upload a échoué (injection Base64)
+            if image and not file_id and b64_image:
+                # On injecte l'image directement en Base64 dans le prompt si l'upload Google échoue
+                prompt = f"Analyse cette image fournie en Base64 :\n{b64_image}\n\nQuestion : {prompt}"
+            elif image and not file_id:
+                # Dernier recours si même le base64 a échoué
+                prompt = f"Analyse cette image : {image}\n\nQuestion : {prompt}"
 
         # Construction de la requête Gemini
         if file_id:
