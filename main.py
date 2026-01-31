@@ -40,7 +40,6 @@ class GeminiSession:
         
         cookies = {}
         if not os.path.exists(COOKIES_FILE):
-            # Fallback si le fichier spécifique n'existe pas, on cherche n'importe quel fichier de cookies
             cookie_files = [f for f in os.listdir('.') if 'cookies' in f and f.endswith('.txt')]
             if cookie_files:
                 target_file = cookie_files[0]
@@ -78,9 +77,57 @@ class GeminiSession:
             print(f"Erreur de rafraîchissement de session: {e}")
             raise
 
-    def upload_image(self, image_path: str, token: str):
-        # Pour l'instant, on garde la logique de fallback car l'upload Gemini est complexe
-        return None 
+    def upload_image(self, image_path: str):
+        """
+        Upload une image vers les serveurs Google pour obtenir un file_id utilisable par Gemini.
+        """
+        try:
+            session, token = self.refresh()
+            with open(image_path, 'rb') as f:
+                image_data = f.read()
+            
+            mime_type, _ = mimetypes.guess_type(image_path)
+            if not mime_type:
+                mime_type = 'image/jpeg'
+            
+            size = len(image_data)
+            
+            headers = {
+                "Content-Type": "application/x-www-form-urlencoded;charset=utf-8",
+                "X-Goog-Upload-Command": "start",
+                "X-Goog-Upload-Header-Content-Length": str(size),
+                "X-Goog-Upload-Header-Content-Type": mime_type,
+                "X-Goog-Upload-Protocol": "resumable"
+            }
+            
+            # Étape 1: Initialiser l'upload
+            upload_url = "https://content-push.googleapis.com/upload/"
+            resp = session.post(upload_url, headers=headers, timeout=30)
+            
+            if resp.status_code != 200:
+                print(f"Échec initialisation upload: {resp.status_code}")
+                return None
+            
+            upload_session_url = resp.headers.get("X-Goog-Upload-Url")
+            if not upload_session_url:
+                return None
+            
+            # Étape 2: Envoyer les données binaires
+            headers = {
+                "X-Goog-Upload-Command": "upload, finalize",
+                "X-Goog-Upload-Offset": "0"
+            }
+            resp = session.post(upload_session_url, headers=headers, data=image_data, timeout=60)
+            
+            if resp.status_code == 200:
+                file_id = resp.text
+                print(f"Image uploadée avec succès, file_id: {file_id}")
+                return file_id
+            
+            return None
+        except Exception as e:
+            print(f"Erreur lors de l'upload vers Google: {e}")
+            return None
 
 gemini_auth = GeminiSession()
 
@@ -117,8 +164,6 @@ async def process_gemini_request(prompt: str, image: Optional[str] = None, uid: 
                     with open(temp_image_path, 'wb') as f:
                         f.write(image_data)
                     image_to_upload = temp_image_path
-                    # On garde une trace qu'il s'agit d'une image base64
-                    image_info = "Image transmise en Base64"
                 except Exception as e:
                     print(f"Erreur décodage base64: {e}")
             elif image.startswith("http"):
@@ -134,19 +179,24 @@ async def process_gemini_request(prompt: str, image: Optional[str] = None, uid: 
                 except Exception as e:
                     print(f"Erreur téléchargement image: {e}")
 
-            # Fallback prompt si l'upload n'est pas implémenté
+            # Tentative d'upload réel vers Google
+            if temp_image_path and os.path.exists(temp_image_path):
+                file_id = gemini_auth.upload_image(temp_image_path)
+
+            # Fallback prompt si l'upload a échoué
             if image and not file_id:
-                if image.startswith("data:image") or "image_info" in locals():
+                if image.startswith("data:image"):
                     prompt = f"[Analyse l'image jointe en Base64]\n\n{prompt}"
                 else:
                     prompt = f"[Image: {image}]\n\n{prompt}"
 
-
-        req = [[prompt], None, ["", "", ""]]
-        
+        # Construction de la requête Gemini
         if file_id:
-            image_data = [file_id, 1, 1]
-            req = [[prompt, [image_data]], None, ["", "", ""]]
+            # Structure pour inclure une image dans la requête Bard/Gemini
+            image_data = [[file_id, 1], None, None]
+            req = [[prompt, 0, None, [image_data]], None, ["", "", ""]]
+        else:
+            req = [[prompt], None, ["", "", ""]]
             
         payload = {"f.req": json.dumps([None, json.dumps(req)]), "at": token}
         url = "https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate"
@@ -157,14 +207,11 @@ async def process_gemini_request(prompt: str, image: Optional[str] = None, uid: 
         for line in resp.iter_lines():
             if line:
                 decoded_line = line.decode('utf-8')
-                # print(f"DEBUG: Ligne reçue: {decoded_line[:100]}") # Trop verbeux
                 if "wrb.fr" in decoded_line:
                     res = extract_text(decoded_line)
                     if res:
                         answer = res
                         break
-        
-
         
         resp.close()
         
@@ -175,7 +222,8 @@ async def process_gemini_request(prompt: str, image: Optional[str] = None, uid: 
             "status": "success",
             "uid": uid,
             "answer": answer or "Je n'ai pas pu générer de réponse.",
-            "execution_time": f"{round(time.time() - start_time, 2)}s"
+            "execution_time": f"{round(time.time() - start_time, 2)}s",
+            "image_processed": True if file_id else False
         }
     except Exception as e:
         if temp_image_path and os.path.exists(temp_image_path):
