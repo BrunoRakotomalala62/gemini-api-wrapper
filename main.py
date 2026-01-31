@@ -117,7 +117,8 @@ async def process_gemini_request(prompt: str, image: Optional[str] = None, uid: 
                     with open(temp_image_path, 'wb') as f:
                         f.write(image_data)
                     image_to_upload = temp_image_path
-                    image = f"Image_Base64" 
+                    # On garde une trace qu'il s'agit d'une image base64
+                    image_info = "Image transmise en Base64"
                 except Exception as e:
                     print(f"Erreur décodage base64: {e}")
             elif image.startswith("http"):
@@ -135,13 +136,11 @@ async def process_gemini_request(prompt: str, image: Optional[str] = None, uid: 
 
             # Fallback prompt si l'upload n'est pas implémenté
             if image and not file_id:
-                if image == "Image_Base64":
-                    # Pour le test, on va simuler l'envoi de l'image en incluant sa description ou en utilisant l'URL si possible
-                    # Dans ce wrapper, l'image est juste un placeholder. 
-                    # Pour que Gemini "voie" l'image via ce wrapper, il faudrait qu'elle soit uploadée sur les serveurs de Google.
-                    prompt = f"[Analyse cette image: {image}]\n\n{prompt}"
+                if image.startswith("data:image") or "image_info" in locals():
+                    prompt = f"[Analyse l'image jointe en Base64]\n\n{prompt}"
                 else:
                     prompt = f"[Image: {image}]\n\n{prompt}"
+
 
         req = [[prompt], None, ["", "", ""]]
         
@@ -158,11 +157,14 @@ async def process_gemini_request(prompt: str, image: Optional[str] = None, uid: 
         for line in resp.iter_lines():
             if line:
                 decoded_line = line.decode('utf-8')
+                # print(f"DEBUG: Ligne reçue: {decoded_line[:100]}") # Trop verbeux
                 if "wrb.fr" in decoded_line:
                     res = extract_text(decoded_line)
                     if res:
                         answer = res
                         break
+        
+
         
         resp.close()
         
