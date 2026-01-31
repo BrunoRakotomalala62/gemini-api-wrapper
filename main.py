@@ -115,7 +115,8 @@ class GeminiSession:
             # Étape 2: Envoyer les données binaires
             headers = {
                 "X-Goog-Upload-Command": "upload, finalize",
-                "X-Goog-Upload-Offset": "0"
+                "X-Goog-Upload-Offset": "0",
+                "X-Goog-Upload-Header-Content-Length": str(size)
             }
             resp = session.post(upload_session_url, headers=headers, data=image_data, timeout=60)
             
@@ -188,7 +189,8 @@ async def process_gemini_request(prompt: str, image: Optional[str] = None, uid: 
                 if image.startswith("data:image"):
                     prompt = f"[Analyse l'image jointe en Base64]\n\n{prompt}"
                 else:
-                    prompt = f"[Image: {image}]\n\n{prompt}"
+                    # Utilisation d'un format plus naturel pour Gemini
+                    prompt = f"Décris précisément ce que tu vois sur cette image : {image}"
 
         # Construction de la requête Gemini
         if file_id:
