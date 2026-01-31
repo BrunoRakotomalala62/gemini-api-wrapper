@@ -184,7 +184,9 @@ async def process_gemini_request(prompt: str, image: Optional[str] = None, uid: 
 
             # Fallback prompt si l'upload a échoué
             if image and not file_id:
-                prompt = f"Analyse attentivement cette image : {image}\n\nQuestion : {prompt}"
+                # Si l'image est une URL, on demande à Gemini de l'analyser via l'URL
+                # On ajoute une instruction forte pour forcer l'analyse visuelle
+                prompt = f"Voici une image à analyser : {image}\n\nDécris précisément ce que tu vois sur cette photo et réponds à la question suivante : {prompt}"
 
         # Construction de la requête Gemini
         if file_id:
