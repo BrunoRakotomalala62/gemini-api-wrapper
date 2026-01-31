@@ -164,7 +164,6 @@ async def process_gemini_request(prompt: str, image: Optional[str] = None, uid: 
                     temp_image_path = f"/tmp/temp_image_b64_{int(time.time())}.{ext}"
                     with open(temp_image_path, 'wb') as f:
                         f.write(image_data)
-                    image_to_upload = temp_image_path
                 except Exception as e:
                     print(f"Erreur décodage base64: {e}")
             elif image.startswith("http"):
@@ -174,7 +173,6 @@ async def process_gemini_request(prompt: str, image: Optional[str] = None, uid: 
                         temp_image_path = f"/tmp/temp_image_{int(time.time())}.jpg"
                         with open(temp_image_path, 'wb') as f:
                             f.write(img_resp.content)
-                        image_to_upload = temp_image_path
                     else:
                         print(f"Échec téléchargement image: {img_resp.status_code}")
                 except Exception as e:
@@ -186,11 +184,7 @@ async def process_gemini_request(prompt: str, image: Optional[str] = None, uid: 
 
             # Fallback prompt si l'upload a échoué
             if image and not file_id:
-                if image.startswith("data:image"):
-                    prompt = f"[Analyse l'image jointe en Base64]\n\n{prompt}"
-                else:
-                    # Utilisation d'un format plus naturel pour Gemini
-                    prompt = f"Décris précisément ce que tu vois sur cette image : {image}"
+                prompt = f"Analyse attentivement cette image : {image}\n\nQuestion : {prompt}"
 
         # Construction de la requête Gemini
         if file_id:
