@@ -6,7 +6,7 @@ import time
 import mimetypes
 import base64
 from fastapi import FastAPI, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional
 
 app = FastAPI(title="Gemini API Wrapper")
@@ -14,9 +14,12 @@ app = FastAPI(title="Gemini API Wrapper")
 COOKIES_FILE = "gemini.google.com_cookies-2026-01-29T151723.456.txt"
 
 class GeminiRequest(BaseModel):
-    prompt: str
+    prompt: str = Field(..., alias="pro")
     image: Optional[str] = None
     uid: Optional[str] = None
+
+    class Config:
+        populate_by_name = True
 
 class GeminiSession:
     def __init__(self):
@@ -95,7 +98,6 @@ async def process_gemini_request(prompt: str, image: Optional[str] = None, uid: 
                 print("Décodage de l'image base64...")
                 try:
                     header, encoded = image.split(",", 1)
-                    # Extraire l'extension depuis le header (ex: data:image/jpeg;base64)
                     ext_match = re.search(r'image/(.*?);', header)
                     ext = ext_match.group(1) if ext_match else "jpg"
                     
@@ -104,7 +106,6 @@ async def process_gemini_request(prompt: str, image: Optional[str] = None, uid: 
                     with open(temp_image_path, 'wb') as f:
                         f.write(image_data)
                     image_to_upload = temp_image_path
-                    # Pour Gemini Web via prompt fallback, on garde une trace qu'on a une image
                     image = f"Image_Base64_Saisie" 
                 except Exception as e:
                     raise Exception(f"Erreur lors du décodage base64: {e}")
@@ -125,11 +126,8 @@ async def process_gemini_request(prompt: str, image: Optional[str] = None, uid: 
             file_id = gemini_auth.upload_image(image_to_upload, token)
             print(f"Image uploadée. File ID: {file_id}")
 
-        # Construction du prompt avec fallback image si nécessaire
+        # Construction du prompt
         if image and not file_id:
-            # Note: Si c'est du base64, on ne peut pas passer l'URL brute, 
-            # mais ici le code original faisait un fallback sur l'URL.
-            # Pour le base64 décodé localement, on indique juste qu'il y a une image.
             if image == "Image_Base64_Saisie":
                 prompt = f"[Image analysée]\n\n{prompt}"
             else:
@@ -162,20 +160,20 @@ async def process_gemini_request(prompt: str, image: Optional[str] = None, uid: 
             os.remove(temp_image_path)
             
         return {
-            "status": "success",
+            "success": True,
             "uid": uid,
-            "answer": answer or "Réponse reçue.",
+            "response": answer or "Réponse reçue.",
             "execution_time": f"{round(time.time() - start_time, 2)}s"
         }
     except Exception as e:
         print(f"Erreur critique: {e}")
         if temp_image_path and os.path.exists(temp_image_path):
             os.remove(temp_image_path)
-        return {"status": "error", "message": str(e)}
+        return {"success": False, "error": str(e)}
 
 @app.get("/gemini")
-async def gemini_get(prompt: str, image: Optional[str] = None, uid: Optional[str] = None):
-    return await process_gemini_request(prompt, image, uid)
+async def gemini_get(pro: str = Query(...), image: Optional[str] = None, uid: Optional[str] = None):
+    return await process_gemini_request(pro, image, uid)
 
 @app.post("/gemini")
 async def gemini_post(request: GeminiRequest):
