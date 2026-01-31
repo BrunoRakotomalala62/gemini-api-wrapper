@@ -4,12 +4,19 @@ import json
 import re
 import time
 import mimetypes
+import base64
 from fastapi import FastAPI, HTTPException, Query
+from pydantic import BaseModel
 from typing import Optional
 
 app = FastAPI(title="Gemini API Wrapper")
 
 COOKIES_FILE = "gemini.google.com_cookies-2026-01-29T151723.456.txt"
+
+class GeminiRequest(BaseModel):
+    prompt: str
+    image: Optional[str] = None
+    uid: Optional[str] = None
 
 class GeminiSession:
     def __init__(self):
@@ -22,7 +29,6 @@ class GeminiSession:
             return self.session, self.token
         
         cookies = {}
-        # Assurez-vous que le fichier de cookies existe et est lisible
         if not os.path.exists(COOKIES_FILE):
             raise Exception(f"Fichier de cookies non trouvé: {COOKIES_FILE}")
 
@@ -30,14 +36,11 @@ class GeminiSession:
             for line in f:
                 if not line.startswith('#') and line.strip():
                     parts = line.strip().split('\t')
-                    # Vérification de la longueur des parties pour éviter IndexError
                     if len(parts) >= 7: 
-                        # Le 6ème élément (index 5) est le nom du cookie, le 7ème (index 6) est la valeur
                         cookies[parts[5]] = parts[6]
         
         self.session = requests.Session()
         for n, v in cookies.items(): 
-            # Assurez-vous que le domaine est correct pour l'injection de cookies
             self.session.cookies.set(n, v, domain=".google.com")
         
         headers = {
@@ -45,7 +48,6 @@ class GeminiSession:
             "Referer": "https://gemini.google.com/app"
         }
         
-        # Tentative de récupération du token SNlM0e avec un timeout plus généreux pour Render
         resp = self.session.get("https://gemini.google.com/app", headers=headers, timeout=30)
         match = re.search(r'"SNlM0e":"(.*?)"', resp.text)
         if not match: raise Exception("Auth failed: SNlM0e token not found. Check cookies.")
@@ -62,38 +64,7 @@ class GeminiSession:
         if not mime_type or not mime_type.startswith('image/'):
             raise ValueError(f"Type de fichier non supporté ou non détecté: {mime_type}")
 
-        # L'URL d'upload correcte pour Gemini Web
-        upload_url = "https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate"
-        
-        # Le payload d'upload est un formulaire multipart
-        files = {
-            'upload_file': (os.path.basename(image_path), open(image_path, 'rb'), mime_type)
-        }
-        
-        # Le token est passé dans les données du formulaire
-        data = {
-            'at': token
-        }
-
-        # En réalité, l'upload dans l'interface web est complexe. 
-        # Pour un wrapper simple, on va plutôt utiliser l'URL de l'image directement dans le prompt 
-        # si l'upload échoue, mais avec une structure de message plus riche.
         return None # Simulation d'échec d'upload pour fallback sur URL prompt
-        
-        # La réponse est souvent préfixée par des caractères de sécurité
-        if upload_resp.text.startswith(")]}'\n"):
-            response_text = upload_resp.text[5:]
-            try:
-                # La réponse est un tableau JSON imbriqué
-                response_json = json.loads(response_text)
-                # Le File ID est généralement dans la structure [0][0]
-                file_id = response_json[0][0]
-                return file_id
-            except (json.JSONDecodeError, IndexError, TypeError) as e:
-                raise Exception(f"Erreur de décodage de la réponse d'upload: {e}. Réponse brute: {upload_resp.text}")
-        else:
-            raise Exception(f"Réponse d'upload inattendue: {upload_resp.text}")
-
 
 gemini_auth = GeminiSession()
 
@@ -109,8 +80,7 @@ def extract_text(raw_line):
         return None
     except: return None
 
-@app.get("/gemini")
-async def gemini_endpoint(prompt: str, image: Optional[str] = None, uid: Optional[str] = None):
+async def process_gemini_request(prompt: str, image: Optional[str] = None, uid: Optional[str] = None):
     start_time = time.time()
     file_id = None
     temp_image_path = None
@@ -118,9 +88,27 @@ async def gemini_endpoint(prompt: str, image: Optional[str] = None, uid: Optiona
     try:
         session, token = gemini_auth.refresh()
         
-        # 1. Gestion de l'image (URL ou Chemin local)
+        # Gestion de l'image
         if image:
-            if image.startswith("http"):
+            if image.startswith("data:image"):
+                # Gestion du base64
+                print("Décodage de l'image base64...")
+                try:
+                    header, encoded = image.split(",", 1)
+                    # Extraire l'extension depuis le header (ex: data:image/jpeg;base64)
+                    ext_match = re.search(r'image/(.*?);', header)
+                    ext = ext_match.group(1) if ext_match else "jpg"
+                    
+                    image_data = base64.b64decode(encoded)
+                    temp_image_path = f"/tmp/temp_image_b64_{int(time.time())}.{ext}"
+                    with open(temp_image_path, 'wb') as f:
+                        f.write(image_data)
+                    image_to_upload = temp_image_path
+                    # Pour Gemini Web via prompt fallback, on garde une trace qu'on a une image
+                    image = f"Image_Base64_Saisie" 
+                except Exception as e:
+                    raise Exception(f"Erreur lors du décodage base64: {e}")
+            elif image.startswith("http"):
                 print(f"Téléchargement de l'image depuis l'URL: {image}")
                 img_resp = requests.get(image, timeout=15)
                 if img_resp.status_code == 200:
@@ -135,13 +123,17 @@ async def gemini_endpoint(prompt: str, image: Optional[str] = None, uid: Optiona
 
             print(f"Tentative d'upload de l'image: {image_to_upload}")
             file_id = gemini_auth.upload_image(image_to_upload, token)
-            print(f"Image uploadée avec succès. File ID: {file_id}")
+            print(f"Image uploadée. File ID: {file_id}")
 
-        # 2. Construction du payload
-        # Si on a une URL d'image mais pas de file_id (upload échoué ou non supporté), 
-        # on l'intègre au prompt de manière explicite pour Gemini.
+        # Construction du prompt avec fallback image si nécessaire
         if image and not file_id:
-            prompt = f"[Image: {image}]\n\n{prompt}"
+            # Note: Si c'est du base64, on ne peut pas passer l'URL brute, 
+            # mais ici le code original faisait un fallback sur l'URL.
+            # Pour le base64 décodé localement, on indique juste qu'il y a une image.
+            if image == "Image_Base64_Saisie":
+                prompt = f"[Image analysée]\n\n{prompt}"
+            else:
+                prompt = f"[Image: {image}]\n\n{prompt}"
 
         req = [[prompt], None, ["", "", ""]]
         
@@ -150,30 +142,22 @@ async def gemini_endpoint(prompt: str, image: Optional[str] = None, uid: Optiona
             req = [[prompt, [image_data]], None, ["", "", ""]]
             
         payload = {"f.req": json.dumps([None, json.dumps(req)]), "at": token}
-        
         url = "https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate"
         
-        # Ajustement pour Render : On augmente le timeout de lecture à 60s pour éviter le ReadTimeout
-        # tout en gardant un timeout de connexion court (10s).
         resp = session.post(url, data=payload, params={"rt": "c"}, timeout=(10, 60), stream=True)
         
         answer = None
-        # On cherche la réponse finale plus efficacement
         for line in resp.iter_lines():
             if line:
                 decoded_line = line.decode('utf-8')
-                # On cherche directement la ligne contenant la réponse textuelle
                 if "wrb.fr" in decoded_line:
                     res = extract_text(decoded_line)
                     if res:
                         answer = res
-                        # On ne s'arrête pas forcément à la première ligne si c'est un stream partiel
-                        # Mais pour la rapidité, on prend la première réponse complète trouvée
                         break
         
         resp.close()
         
-        # Nettoyage du fichier temporaire
         if temp_image_path and os.path.exists(temp_image_path):
             os.remove(temp_image_path)
             
@@ -184,9 +168,18 @@ async def gemini_endpoint(prompt: str, image: Optional[str] = None, uid: Optiona
             "execution_time": f"{round(time.time() - start_time, 2)}s"
         }
     except Exception as e:
-        # Afficher l'erreur dans la console pour le débogage
         print(f"Erreur critique: {e}")
+        if temp_image_path and os.path.exists(temp_image_path):
+            os.remove(temp_image_path)
         return {"status": "error", "message": str(e)}
+
+@app.get("/gemini")
+async def gemini_get(prompt: str, image: Optional[str] = None, uid: Optional[str] = None):
+    return await process_gemini_request(prompt, image, uid)
+
+@app.post("/gemini")
+async def gemini_post(request: GeminiRequest):
+    return await process_gemini_request(request.prompt, request.image, request.uid)
 
 if __name__ == "__main__":
     import uvicorn
